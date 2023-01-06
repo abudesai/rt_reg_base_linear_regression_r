@@ -1,4 +1,4 @@
-# General Linear Regression Algorithm in R
+# General Linear Regression Algorithm in R as per Ready Tensor specifications
 
 ## Description
 
