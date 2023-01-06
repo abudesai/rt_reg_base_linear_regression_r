@@ -1,0 +1,82 @@
+#!/usr/bin/env Rscript
+
+## ---- Initialising libraries ----
+print("Initialising libraries..")
+library(tibble)
+library(tidyr)
+library(readr)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(glue)
+library(zeallot)
+library(pROC)
+library(forcats)
+library(rjson)
+library(caTools)
+library(CatEncoders)
+
+options(dplyr.summarise.inform = FALSE)
+
+## Script that holp helper functions
+source('algorithm/0.common_funcs.R')
+
+
+model_path <- '/opt/ml_vol/model/artifacts/model.rds'
+data_path <- '/opt/ml_vol/inputs/data/testing/regressionBaseMainInput/'
+prediction_path <- '/opt/ml_vol/outputs/testing_outputs/test_predictions.csv'
+predict_failure_path <- "/opt/ml_vol/outputs/errors/test_failure.txt"
+
+
+get_data <- function() 
+{
+  f_path <- glue( data_path, list.files(path = data_path) )
+  df_test <- read_csv(  
+      f_path <- glue( data_path, list.files(path = data_path) )
+    ) 
+  return(df_test)
+}
+
+get_model <- function() 
+{
+  return(read_rds(model_path))
+}
+
+
+
+save_predictions <- function(predictions)
+{
+  predictions %>% write.csv( prediction_path, row.names=FALSE )
+}
+
+
+tester <- function()
+{
+  ## Load model and test data
+  print("Starting predictions ..")
+  trained_model         <-  get_model()
+  df_test               <-  get_data()
+  predictions           <-  get_predictions(trained_model, df_test)
+  save_predictions(predictions)   
+  print("predictions done")
+  return("predictions successful!")
+}
+
+
+
+tryCatch(
+  # Specifying expression
+  expr = {
+    tester()
+  },
+  # Specifying error message
+  error = function(e) {
+    print("Prediction Error!")
+    write(e %>% as.character(), file = predict_failure_path, append =
+            FALSE)
+    quit(status=1)
+  }
+)
+
+quit(status=0)

@@ -1,0 +1,210 @@
+#!/usr/bin/env Rscript
+
+## ---- Initialising libraries ----
+# library(ggplot2)
+library(tibble)
+library(tidyr)
+library(readr)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(glue)
+library(zeallot)
+library(pROC)
+library(forcats)
+library(rjson)
+library(caTools)
+library(imputeTS)
+library(CatEncoders)
+library(caret)
+
+options(dplyr.summarise.inform = FALSE)
+
+
+## Script that holp helper functions
+source('algorithm/0.common_funcs.R')
+
+
+# get the json file for the schema
+print("get schema data...")
+schema <-
+  glue(
+    '/opt/ml_vol/inputs/data_config/',
+    list.files(path = "/opt/ml_vol/inputs/data_config")
+  )
+
+## Get the training data file
+print("get training data...")
+data   <-
+  glue(
+    '/opt/ml_vol/inputs/data/training/regressionBaseMainInput/',
+    list.files(path = "/opt/ml_vol/inputs/data/training/regressionBaseMainInput")
+  )
+
+
+trainer <- function(schema_path, data_path)
+{ 
+  
+  ## Reading schema
+  print("Reading schema..")
+  file <- fromJSON(file = schema_path)
+  
+  ## Saving id, target, and target class in variables
+  id_column    <-
+    file$inputDatasets$regressionBaseMainInput$idField
+  target_column       <-
+    file$inputDatasets$regressionBaseMainInput$targetField
+  target_class <-
+    file$inputDatasets$regressionBaseMainInput$targetClass
+  features = file$inputDatasets$regressionBaseMainInput$predictorFields
+  
+  
+  ## Splitting data into two categories (Numerical and Categorical)  
+  print("Splitting data into two categories (Numerical and Categorical)..")
+  exp_vars            <- c()
+  variables_to_encode <- c()
+  variables_numeric     <- c()
+  for (field in features)
+  {
+    type <- field[['dataType']]
+    name <- field[['fieldName']]
+    
+    if (type == 'CATEGORICAL')
+    {
+      variables_to_encode <- c(variables_to_encode, name)
+      exp_vars           <- c(exp_vars, name)
+    } else
+    {
+      exp_vars           <- c(exp_vars, name)
+      variables_numeric    <- c(variables_numeric, name)
+    }
+  }
+  
+  
+  ## Reading training data and dropping any row with no label  
+  print("Reading training data..")
+  full_data <-
+    read_csv(data_path) %>% drop_na(target_column)
+  
+  ## Changing datatype of categorical and numeric variables as received from json file
+  print("Changing datatype of categorical and numeric variables..")
+  full_data[variables_to_encode] <-
+    sapply(full_data[variables_to_encode], as.character)
+  full_data[variables_numeric]   <-
+    sapply(full_data[variables_numeric], as.numeric)
+  
+  id     <- full_data[, id_column]
+  target <- full_data[, target_column]
+  
+  ## Impute missing values
+  ## With mean for numeric fields
+  ## And mode for categorical fields
+  print("Impute missing values..")
+  full_data_numeric <-
+    full_data %>% select(variables_numeric) %>% na_mean(option = "mean")
+  
+
+  # scale and impute missing - options for imputation: knnImpute, bagImpute, medianImpute
+  scale_func <- preProcess(as.data.frame(full_data_numeric), method=c("knnImpute")) 
+  full_data_numeric <- predict(scale_func, as.data.frame(full_data_numeric))
+  
+  encodings <- list()
+  
+  cat_impute_func <- NULL
+    
+  ## Encoding categorical variables
+  print("feature encoding..")
+  if (length(variables_to_encode) != 0)
+  {
+
+    full_data_categorical <- full_data  %>% select(variables_to_encode)
+    
+    cat_impute_func <- preProcess(as.data.frame(full_data_categorical), method=c("medianImpute")) 
+    full_data_categorical <- predict(cat_impute_func, as.data.frame(full_data_categorical))
+
+    # full_data_categorical <-
+    #   full_data  %>% select(variables_to_encode) %>%
+    #   mutate(across(everything(), ~ replace_na(.x, calc_mode(.x))))
+    
+    for (i in variables_to_encode) {
+      #define original categorical labels
+      encoding = LabelEncoder.fit(full_data_categorical[[i]])
+      encodings[[i]] <- encoding
+      #convert labels to numeric values
+      full_data_categorical[[i]] = transform(encoding, full_data_categorical[[i]])
+    }
+    exp_vars <-
+      c(full_data_categorical %>% colnames(),
+        full_data_numeric %>% colnames())
+    
+    full_data <-
+      cbind(id, full_data_numeric, full_data_categorical, target)
+    
+  } else{
+    full_data_categorical <- NULL
+    encodings <- NULL
+    exp_vars <- full_data_numeric %>% colnames()
+    full_data <-
+      cbind(id, full_data_numeric, target)
+    
+  }
+  
+  
+  
+  
+  
+  ## Splitting data to train and validation. 70% and 30%
+  print("Splitting data to train and validation..")
+  set.seed(6789)
+  split = sample.split(full_data[[target_column]], SplitRatio = 0.7)
+  df_train = subset(full_data, split == TRUE)
+  df_val = subset(full_data, split == FALSE)
+  
+  colnames(df_train)[colnames(df_train) == get('target_column')] = "label"
+  colnames(df_val)[colnames(df_val) == get('target_column')] = "label"
+  
+  
+  
+  ## Training model model
+  print("Training model model..")
+  ## The return of the function is list with model
+  trained_model <-
+    trainer_func(
+      train_set      = df_train,
+      validation_set = df_val,
+      explanatory_variables = exp_vars
+    )
+  
+  ## Saving other features with the model to use in test and serve
+  print("Saving other features..")
+  trained_model$exp_vars <- exp_vars
+  trained_model$id_column <- id_column
+  trained_model$variables_to_encode <- variables_to_encode
+  trained_model$encodings <- encodings
+  trained_model$variables_numeric <- variables_numeric
+  trained_model$full_data_numeric <- full_data_numeric
+  trained_model$scale_func <- scale_func
+  trained_model$cat_impute_func <- cat_impute_func
+  print("Saving model..")
+  trained_model %>% write_rds('/opt/ml_vol/model/artifacts/model.rds')
+  print("Training done")
+}
+
+tryCatch(
+  # Specifying expression
+  expr = {
+    trainer(schema, data)
+  },
+  # Specifying error message
+  error = function(e) {
+    print("Error!")
+    print(e)
+    write(e %>% as.character(), file = "/opt/ml_vol/outputs/errors/train_failure.txt", append =
+            FALSE)
+    
+    quit(status=1)
+  }
+)
+
+quit(status=0)
